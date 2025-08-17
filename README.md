@@ -9,7 +9,7 @@ Welcome to my Data Science projects repository! Here you'll find a collection of
 ### 1. Life Happiness Project
 - **Description:** analyzing global happiness factors using Python. Includes exploratory data analysis, correlations with GDP and health, and interactive visualizations.
 - **Tools:** Python (Pandas, Matplotlib, Seaborn, Numpy)
-- **Notebook:** [View Jupyter Notebook]([Netflix Data Exploration.ipynb](https://github.com/Sebo1704/data-science-projects-1/blob/main/Life%20Happiness%20Project.ipynb))
+- **Notebook:** [View Life Happiness Project]([https://github.com/Sebo1704/data-science-projects-1/blob/main/Life%20Happiness%20Project.ipynb)
 
 ### 2. Netflix Data Exploration
 - **Description:** Explored the Kaggle dataset of netflix data using python.
