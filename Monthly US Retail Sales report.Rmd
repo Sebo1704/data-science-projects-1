@@ -1,0 +1,325 @@
+---
+title: "Monthly US Retail Sales"
+author: "Dimpho Mola"
+date: "2025-11-17"
+output:
+  html_document: default
+  pdf_document: default
+fontsize: 11pt
+geometry: margin=1.5cm
+mainfont: "Arial"
+bibliography: report.bib
+link-citation: yes
+---
+###
+This file loads monthly retails sales in the US per month, the data is first adjusted for inflation and will be used to forecast sales for the next two years of sales per month.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.align="center")
+library(tidyverse)
+library(tsibble)
+library(lubridate)
+library(fable)
+library(feasts)
+library(timetk)
+library(gtrendsR)
+library(knitr)
+library(fpp3)
+library(ggplot2)
+library(dplyr)
+library(fredr)
+```
+
+
+## Data Source
+```{r setup_PCEPI, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Load the series
+fredr_set_key("5331126f0514306cb27cd334a5fe24cc")  
+RSFSXMV <- fredr(series_id = "RSFSXMV")
+head(RSFSXMV)
+PCEPI <- fredr(series_id = "PCEPI")
+```
+
+```{r view dataset, echo=FALSE, message=FALSE, warning=FALSE}
+head(PCEPI)
+options(scipen = 999)
+```
+## Inflation adjustment
+```{r Convert CPI Inflation, echo=FALSE, message=FALSE, warning=FALSE}
+# Merge and compute real sales
+RSFSXMV_real <- inner_join(RSFSXMV, PCEPI, by = "date", suffix = c("_RSFSXMV", "_PCEPI")) |>
+  mutate(real_sales = value_RSFSXMV / value_PCEPI)
+
+# Inspect
+head(RSFSXMV_real)
+```
+
+The dataset used for this report is the Advance Retail Sales: Retail Trade and Food Services, Excluding Motor Vehicle and Parts Dealers series (RSFSXMV), obtained from the US Federal Reserve Economic Data (FRED) database)using the R package fredr .[@uscensus_RSFSXMV]
+
+To account for inflation and analyze real sales trends, the series was adjusted using the Personal Consumption Expenditures Price Index (PCEPI) from FRED.[@uscensus_RSFSXMV] The adjustment was performed by dividing the nominal retail sales by the corresponding PCEPI values and multiplying by 100.
+
+## Exploratory Data Analysis
+*Table 1* gives the summary of the first 6 rows of the inflation adjusted dataset
+```{r Convert to Tsibble, echo=FALSE, message=FALSE, warning=FALSE}
+# Convert to tibble 
+RSFSXMV_real_df <- RSFSXMV_real |>
+  tk_tbl(preserve_index = TRUE, rename_index = "date") |>   
+  mutate(Month = yearmonth(date)) |>                        
+  as_tsibble(index = Month) |>                              
+  rename(real_sales = real_sales)
+```
+
+```{r view_head, echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+
+# Show first 6 rows as a clean table
+head(RSFSXMV_real_df) |>
+  kable(caption = "Table 1: Head data of Inflation-Adjusted Retail Sales")
+```
+
+```{r plot_real_sales,  echo=FALSE, message=FALSE, warning=FALSE}
+# Plot the real retail sales data
+autoplot(RSFSXMV_real_df, real_sales) +
+  labs(
+    title = "Figure 1:Real Retail Sales Excluding Motor Vehicles",x = "Month",y = "Real Retail Sales (Adjusted for Inflation)") +theme_minimal() + geom_line(color = "blue")
+```
+The inflation-adjusted retail sales series in *Figure 1* displays a clear upward trend from 1992 onwards, reflecting steady long-term growth in consumer spending. However, two declines were identified throughout the time frame, firstly outlining the decline in 2008, which may have been due to the multi international financial crisis that occurred during December 2007 and June 2009 in the US which contributed to the 2008 financial crisis.[@housingcrisis2009] Secondly a sharp decline in sales between February 2020 and April 2020, followed by a rapid rebound in May 2020.[@omer2020covid] This abrupt dip and recovery correspond to the onset of the COVID-19 pandemic in the United States, during which lockdown measures caused a sudden drop in consumer spending, followed by a surge as restrictions were eased. Outside of this period, the series fluctuates modestly around the trend, with no strong seasonal patterns, indicating that trend dynamics are the primary driver of the series
+
+
+```{r ACF AND PACF, echo=FALSE, message=FALSE, warning=FALSE}
+#ACF plot
+
+RSFSXMV_real_df |>
+  ACF(real_sales) |>
+  autoplot() +
+  labs(title = "Figure 2: ACF Plot of Real Retail Sales")
+
+# PACF plot
+RSFSXMV_real_df |>
+  PACF(real_sales) |>
+  autoplot() +
+  labs(title = "Figure 3: PACF Plot of Real Retail Sales")
+
+```
+The ACF plot in *Figure 2* shows significant positive auto-correlations at the first few lags, indicating that past values of real retail sales are strongly correlated with current values. The PACF plot in *Figure 3* shows a significant spike at lag 1 and smaller values afterward, suggesting that a first-order auto-regressive process may be appropriate. These patterns guided the selection of Autoregression (AR), Integration (I), and Moving Average (MA), ARIMA models for forecasting.
+```{r Lambda, echo=FALSE, message=FALSE, warning=FALSE}
+# Estimate the optimal lambda for Box-Cox transformation
+lambda <- RSFSXMV_real_df |>
+  features(real_sales, features = guerrero) |>
+  pull(lambda_guerrero)
+
+lambda
+```
+The *lambda* *value = -0.8999268* tell us that the data has a strong positive skeweness, showing that we have a large upward fluctuation that pulls the mean upwards. 
+
+Applying the box- cox transformation will compress high values and expand low values, stabilizing the variance.
+
+```{r BoxCoxTransform, echo=FALSE, message=FALSE, warning=FALSE}
+# Apply the Box–Cox transformation to the real sales data
+RSFSXMV_real_df <- RSFSXMV_real_df|>
+  mutate(real_sales_boxcox = box_cox(real_sales, lambda))
+
+# Visualize transformed data
+RSFSXMV_real_df|>
+  autoplot(real_sales_boxcox) +
+  labs(title = "Figure 4: Box–Cox Transformed Real Retail Sales",
+       y = "Transformed Sales", x = "Month")
+
+```       
+A Box–Cox transformation with *lambda* = -0.8999 was applied to make the real retail sales data more stable and less skewed. After the transformation, *Figure 4* shows the variation in the series appeared more consistent over time, showing that the large peaks were compressed. The reduction in skewness also confirmed that the transformation helped smooth out extreme values and made the data more balanced.   
+
+The hypotheses are:
+
+*H0* (null): The series is stationary.
+
+*H1* (alternative): The series is non-stationary.
+```{r kpss and differencing, echo=FALSE, message=FALSE, warning=FALSE}
+RSFSXMV_real_df|>
+  features(real_sales, unitroot_kpss)
+
+RSFSXMV_real_df|>
+  features(real_sales, unitroot_ndiffs)
+```
+The KPSS test was used to check whether the real retail sales data was stationary. The test *gave a statistic of 6.408* and a *p-value of 0.01*. Since the p-value is below 0.05, this means the data is not stationary. To make it stationary, The unitroot_ndiffs function indicated that taking one *difference (d = 1)* would be sufficient.
+
+## Time Series Analysis
+
+```{r STL Decomposition, echo=FALSE, message=FALSE, warning=FALSE}
+# STL decomposition of the real_sales series
+stl_decomp <- RSFSXMV_real_df|>
+  model(STL(real_sales ~ trend(window = 12) + season(window = "periodic")))
+
+# Extract components
+
+components(stl_decomp)|>
+  autoplot() +
+  labs(title = "Figure 5: STL Decomposition of Real Retail Sales",
+       y = "Sales (US$)",
+       x = "Month")
+
+```
+**STL decomposition was applied to the real retail sales series to separate trend, seasonal, and remainder components displayed in figure 5**
+
+The trend component revealed a steady upward growth in sales over time, the trend also shows the downward spikes during the beginning the financial housing crisis between December 2007 and June 2009[@housingcrisis2009] as well as that of the COVID-19 Pandemic lockdown between January 2020 and May 2020.[@omer2020covid]
+ 
+while the seasonal component was minimal,showing consistent and strong waves indicating that retail sales tend to peak and trough at similar months annually, likely due to predictable consumer behavior and shopping cycle.
+ 
+The remainder appeared roughly stationary, indicating that the primary dynamics of the series are captured by the trend but also capturing the sharp decline and rebound observed between February and May 2020, corresponding to the COVID-19 pandemic.[@omer2020covid]
+
+## Modeling and Forecasting
+
+This analysis supports the use of ETS and ARIMA models with trend components and minimal seasonal terms
+```{r FIT ETS, echo=FALSE, message=FALSE, warning=FALSE}
+# Fit an ETS model
+fit_ets <- RSFSXMV_real_df |>
+  model(ETS(real_sales))
+
+# Summary of the model
+report(fit_ets)
+```
+
+*An Exponential Smoothing (ETS) model was fitted to the inflation-adjusted retail sales data.*
+
+Based on the results, the best-fitting model identified was Error, Trend, and Seasonality ETS(M,A,N) - Error (M=Multiplicative), Trend (A=Additive), and Seasonal (N=None) components, which means the series follows a multiplicative error structure with an additive trend and no seasonality.
+
+The smoothing parameter for the level (Alpha = 0.76) shows that the model gives more weight to recent data points, while the trend parameter (Beta = 0.0001) indicates a stable, slowly changing trend.
+
+The initial level was estimated at about 200,154 with a monthly trend of roughly 649 units.
+
+The forecasts suggest that real retail sales are expected to continue growing at a steady rate, but with widening prediction intervals reflecting greater uncertainty over time.
+
+Residual diagnostics showed no strong patterns, confirming that the ETS model adequately captures the main dynamics of the data.
+
+```{r forecast ETS, echo=FALSE, message=FALSE, warning=FALSE}
+# Forecast the next 24 months
+forecast_ets <- fit_ets |>
+  forecast(h = "24 months")
+
+# Plot forecasts
+forecast_ets |>
+  autoplot(RSFSXMV_real_df) +
+  labs(title = "Figure 6: ETS(M,A,N) Forecast for Real Retail Sales",
+       y = "Inflation-adjusted Sales (US$)",
+       x = "Year")
+```
+
+```{r fit residuals, echo=FALSE, message=FALSE, warning=FALSE}
+gg_tsresiduals(fit_ets)
+```
+
+```{r ARIMA report, echo=FALSE, message=FALSE, warning=FALSE}
+fit_arima <- RSFSXMV_real_df |>
+  model(ARIMA(real_sales))
+
+report(fit_arima)
+```
+
+The ARIMA model fitted to the real retail sales series was ARIMA(0,1,2) with drift, indicating that one non-seasonal difference was required for stationarity, with two moving average terms capturing short-term autocorrelation.
+
+The estimated drift term of 654 units per month reflects a consistent upward trend in sales over time.
+
+The MA coefficients are negative, indicating that past forecast errors are corrected in the subsequent periods.
+
+Model fit statistics (AIC = 7969.95, BIC = 7985.94) suggest a good fit, and residual diagnostics confirmed no significant autocorrelation in the residuals.
+
+The ARIMA forecasts show a continuation of the gradual upward trend observed in historical data, with uncertainty increasing over the forecast horizon.
+
+```{r Forecast ARIMA, echo=FALSE, message=FALSE, warning=FALSE}
+forecast_arima <- fit_arima |>
+  forecast(h = "24 months")
+
+forecast_arima |>
+  autoplot(RSFSXMV_real_df) +
+  labs(title = " Figure 7: ARIMA Forecast for Real Retail Sales",
+       y = "Inflation-adjusted Sales (US$)",
+       x = "Year")
+
+```
+
+
+```{r Compare ETS vs ARIMA, echo=FALSE, message=FALSE, warning=FALSE}
+bind_rows(
+  forecast_ets |> mutate(model = "ETS(M,A,N)"),
+  forecast_arima |> mutate(model = "ARIMA(0,1,2) w/ drift")
+) |>
+  autoplot(RSFSXMV_real_df, level = NULL) +
+  labs(title = "Figure 8: Comparison of ETS vs ARIMA Forecasts",
+       y = "Sales (US$)", x = "Year") +
+  facet_wrap(~model)
+```
+
+```{r train and test models, echo=FALSE, message=FALSE, warning=FALSE}
+
+#  Split data: last 24 months as test
+train <- RSFSXMV_real_df|> filter_index(~ "2023 Dec")   
+
+test  <- RSFSXMV_real_df|> filter_index("2024 Jan" ~ .)
+
+# Fit ETS and ARIMA on training data
+fit_train <- train|>
+  model(
+    ETS_model   = ETS(real_sales),
+    ARIMA_model = ARIMA(real_sales)
+  )
+
+# Generate 24-month forecasts on test period
+forecast_train <- fit_train|>
+  forecast(new_data = test)
+```
+
+## Evaluation 
+
+```{r Accuracy, echo=FALSE, message=FALSE, warning=FALSE}
+# Compute accuracy
+accuracy(forecast_train, test)
+
+```
+
+The forecast accuracy of the ETS(M,A,N) and ARIMA(0,1,2) with drift models was evaluated over a 24-month holdout period.
+
+The ETS model produced slightly lower errors (RMSE = 6165, MAE = 6004) compared to ARIMA (RMSE = 6645, MAE = 6495), indicating better overall predictive performance.
+
+Both models showed minor under-forecasting (MPE around –1.3% for ETS and –1.4% for ARIMA), and the residual autocorrelation at lag 1 was low for both, suggesting that the forecasts adequately captured the underlying structure of the series.
+
+Overall, the ETS model provided the most reliable forecasts for the real retail sales series in this evaluation.
+
+```{r simple forecast models, echo=FALSE, message=FALSE, warning=FALSE}
+fit_benchmarks <- train|>
+  model(
+    Naive_model   = NAIVE(real_sales),
+    Drift_model   = RW(real_sales ~ drift()),
+    SNaive_model  = SNAIVE(real_sales)
+  )
+```
+
+```{r Benchmark, echo=FALSE, message=FALSE, warning=FALSE }
+forecast_benchmarks <- fit_benchmarks|>
+  forecast(new_data = test)
+
+accuracy(forecast_benchmarks, test)
+```
+
+Among the simple benchmark models, the Drift model performs best in terms of RMSSE and residual autocorrelation. However, ETS and ARIMA (from previous analysis) still outperform all simple models, justifying their use for capturing trend and seasonal patterns in retail sales.
+
+```{r STL and ETS, echo=FALSE, message=FALSE, warning=FALSE}
+fit_stl <- RSFSXMV_real_df |> model(
+  STL_ETS = decomposition_model(
+    STL(real_sales ~ season(window = "periodic")),
+    ETS(remainder)
+  )
+)
+fc_stl <- fit_stl |> forecast(h = "24 months")
+```
+
+## Conclusion and Recommendation 
+This study analysed U.S. retail sales, specifically retail and food services excluding motor vehicles, after adjusting the data for inflation. The aim was to understand long-term spending patterns and to forecast how retail activity may evolve in the future.
+
+The data shows a steady upward trend over time, with two major drops: one during the 2007–2009 financial crisis and another during the 2020 COVID-19 lockdown. While both periods disrupted consumer spending, the recovery after COVID-19 was much quicker. This indicates that the economy bounces back faster from short-term, external shocks than from deeper, financially driven recessions.
+
+Different forecasting methods were tested to see which one could provide the most reliable predictions. The model that performed best was one (Error Trend and Seasonality model) that captures patterns in the data such as long-term growth and short-term fluctuations. Simpler forecasting approaches did not perform as well.
+
+Overall, the results show that U.S. retail sales have strong long-term growth and high resilience, even during major disruptions. The forecasting model used in the study provides reliable predictions that can help businesses and policymakers plan ahead.
+
+Future work could improve these forecasts by including additional economic indicators like employment trends or consumer confidence.
+
+# References
